@@ -1,519 +1,552 @@
 #!/usr/bin/env python3
-"""news-image-20261125 v3 — one-day world news image, drawn from scratch.
+"""news-image-20261125 v4 — "THE WORLD TODAY".
 
-Pure Python standard library only. Draws a 1024x1024 newspaper front page
-for Wednesday 25 November 2026: masthead, hero scene of tankers burning in
-the Strait of Hormuz, and three story cards (Huawei, Pacific Pact, Ukraine
-refineries), each with its own picture. Writes entry.png into
-$MAKEFUN_OUTPUT_DIR. Deterministic: same bytes every run.
+One 1024x1024 PNG summing up Wednesday 25 November 2026's world news,
+drawn from scratch in pure Python standard library (no PIL, no network,
+no image assets). Every glyph is a vector/pixel letterform defined below;
+the PNG encoder is written by hand.
+
+Design (thumbnail-first, from the DeepAI critique of v3):
+  * bright high-key page, flat editorial pictograms, 5-colour palette
+  * two-tier typography: nothing below 32px cap height
+  * hero: two tankers hit mines and burn in the Strait of Hormuz
+  * four cards, one per region: East Asia, Pacific, Europe, South Asia
+
+Stories (verified, Wednesday 25 November 2026 only):
+  1. Two oil tankers hit sea mines and caught fire in the Strait of
+     Hormuz (Reuters, Dubai, 25 Nov).
+  2. Huawei convicted in a major US criminal trial over Iran business
+     (Reuters, 25 Nov 10:58).
+  3. Australia and Solomon Islands sign a major Pacific security pact
+     (reported 25 Nov).
+  4. Ukraine strikes Russian energy infrastructure amid peace-framework
+     diplomacy (reported 25 Nov).
+  5. China's Shenzhou-24 docks at Tiangong with Pakistan's first
+     astronaut aboard — the first foreign astronaut on the station
+     (Reuters, 25 Nov 17:47).
+
+Run:  MAKEFUN_OUTPUT_DIR=<dir> python3 -P -s main.py
+Writes <dir>/entry.png (1024x1024, <= 1 MiB, deterministic).
 """
 
+import math
 import os
 import struct
 import sys
 import zlib
 
-W = 1024
-H = 1024
+W = H = 1024
 
-# ---------------------------------------------------------------- palette ---
-PAPER = (247, 239, 223)   # warm paper
-INK = (26, 26, 38)        # dark ink
-CARD = (255, 253, 246)    # card paper
-ACCENT = (196, 48, 32)    # brick red
-GOLD = (212, 160, 32)     # date gold
-SKY1 = (228, 87, 46)      # dusk orange top
-SKY2 = (240, 138, 60)
-SKY3 = (247, 178, 103)
-SKY4 = (249, 217, 118)    # horizon pale
-SEA = (15, 59, 76)        # deep sea
-SEA2 = (30, 107, 122)     # wave light
-HULL = (31, 42, 51)       # tanker hull
-HULLRED = (150, 40, 28)   # hull waterline stripe
-SUPER = (238, 234, 222)   # superstructure
-FLAME_Y = (255, 210, 63)
-FLAME_O = (255, 122, 26)
-FLAME_R = (215, 38, 61)
-SMOKE = (90, 90, 92)
-SMOKE2 = (120, 120, 122)
-SUN = (255, 243, 196)
-NAVY = (18, 38, 66)      # card 1 background
-CHIP = (212, 160, 32)
-PHONE = (38, 44, 58)
-OCEAN = (44, 125, 160)   # card 2 background
-ISLAND = (74, 140, 74)
-DUSK = (52, 44, 74)      # card 3 background
-STEEL = (70, 76, 92)
-WHITE = (255, 255, 255)
+# --- palette (5 colours max) ---------------------------------------------
+PAPER = (247, 243, 232)   # off-white paper
+INK = (20, 20, 20)        # near-black ink
+RED = (193, 18, 31)       # accent red
+TEAL = (15, 76, 92)       # sea teal
+OCHRE = (217, 164, 65)    # flame ochre
+WHITE = (255, 255, 255)   # wave highlights only (paper-light variant)
 
-# ------------------------------------------------------------- bitmap font --
-# 5x7 uppercase font, drawn from memory. '#' = on.
+# --- canvas ----------------------------------------------------------------
+_rows = None
+
+
+def new_canvas():
+    global _rows
+    fill = bytes(PAPER) * W
+    _rows = [bytearray(fill) for _ in range(H)]
+
+
+def clip(v, lo, hi):
+    return lo if v < lo else hi if v > hi else v
+
+
+def fill_rect(x, y, w, h, color):
+    """Fill an axis-aligned rectangle (floats allowed; clipped)."""
+    x0 = int(round(x))
+    y0 = int(round(y))
+    x1 = int(round(x + w))
+    y1 = int(round(y + h))
+    x0 = clip(x0, 0, W)
+    y0 = clip(y0, 0, H)
+    x1 = clip(x1, 0, W)
+    y1 = clip(y1, 0, H)
+    if x1 <= x0 or y1 <= y0:
+        return
+    r, g, b = color
+    span = bytes((r, g, b)) * (x1 - x0)
+    for yy in range(y0, y1):
+        row = _rows[yy]
+        row[x0 * 3:x1 * 3] = span
+
+
+def fill_circle(cx, cy, r, color):
+    """Filled circle, centre (cx, cy), radius r."""
+    x0 = int(math.floor(cx - r))
+    x1 = int(math.ceil(cx + r))
+    y0 = int(math.floor(cy - r))
+    y1 = int(math.ceil(cy + r))
+    r2 = r * r
+    for yy in range(max(0, y0), min(H, y1 + 1)):
+        dy = yy + 0.5 - cy
+        dx = math.sqrt(max(0.0, r2 - dy * dy))
+        fill_rect(cx - dx, yy, dx * 2, 1, color)
+
+
+def ring(cx, cy, r_out, r_in, color):
+    """Circle outline (filled ring)."""
+    fill_circle(cx, cy, r_out, color)
+    fill_circle(cx, cy, r_in, PAPER)
+
+
+def fill_ellipse(cx, cy, rx, ry, color):
+    x0 = int(math.floor(cx - rx))
+    x1 = int(math.ceil(cx + rx))
+    y0 = int(math.floor(cy - ry))
+    y1 = int(math.ceil(cy + ry))
+    for yy in range(max(0, y0), min(H, y1 + 1)):
+        dy = (yy + 0.5 - cy) / ry
+        if abs(dy) > 1.0:
+            continue
+        dx = rx * math.sqrt(max(0.0, 1.0 - dy * dy))
+        fill_rect(cx - dx, yy, dx * 2, 1, color)
+
+
+def fill_polygon(points, color):
+    """Scanline fill of a simple polygon (even-odd)."""
+    if len(points) < 3:
+        return
+    ys = [p[1] for p in points]
+    y0 = int(math.floor(min(ys)))
+    y1 = int(math.ceil(max(ys)))
+    n = len(points)
+    for yy in range(max(0, y0), min(H, y1 + 1)):
+        y = yy + 0.5
+        xs = []
+        for i in range(n):
+            x1, y1p = points[i]
+            x2, y2p = points[(i + 1) % n]
+            if (y1p <= y < y2p) or (y2p <= y < y1p):
+                t = (y - y1p) / (y2p - y1p)
+                xs.append(x1 + t * (x2 - x1))
+        xs.sort()
+        for k in range(0, len(xs) - 1, 2):
+            fill_rect(xs[k], yy, xs[k + 1] - xs[k], 1, color)
+
+
+def thick_line(x0, y0, x1, y1, width, color):
+    """Line drawn as a chain of filled discs (deterministic)."""
+    dx = x1 - x0
+    dy = y1 - y0
+    length = math.hypot(dx, dy)
+    steps = max(1, int(length / max(1.0, width * 0.4)))
+    r = width / 2.0
+    for i in range(steps + 1):
+        t = i / steps
+        fill_circle(x0 + dx * t, y0 + dy * t, r, color)
+
+
+def dashed_line(x0, y0, x1, y1, dash, gap, width, color):
+    """Dashed straight line."""
+    dx = x1 - x0
+    dy = y1 - y0
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return
+    ux, uy = dx / length, dy / length
+    pos = 0.0
+    while pos < length:
+        end = min(pos + dash, length)
+        thick_line(x0 + ux * pos, y0 + uy * pos,
+                   x0 + ux * end, y0 + uy * end, width, color)
+        pos = end + gap
+
+
+# --- pixel font (5x7 grid, proportional widths) ---------------------------
+# Each glyph: 7 rows; row length = glyph width in grid cells.
+# Cap height = 7 units; advance = (width + 0.5) units.
 FONT = {
-    'A': ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
-    'B': ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
-    'C': ("01110", "10001", "10000", "10000", "10000", "10001", "01110"),
-    'D': ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
-    'E': ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
-    'F': ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
-    'G': ("01110", "10001", "10000", "10111", "10001", "10001", "01111"),
-    'H': ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
-    'I': ("01110", "00100", "00100", "00100", "00100", "00100", "01110"),
-    'J': ("00111", "00010", "00010", "00010", "00010", "10010", "01100"),
-    'K': ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
-    'L': ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
-    'M': ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
-    'N': ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
-    'O': ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
-    'P': ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
-    'Q': ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
-    'R': ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
-    'S': ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
-    'T': ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
-    'U': ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
-    'V': ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
-    'W': ("10001", "10001", "10001", "10101", "10101", "10101", "01010"),
-    'X': ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
-    'Y': ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
-    'Z': ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
-    '0': ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
-    '1': ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
-    '2': ("01110", "10001", "00001", "00110", "01000", "10000", "11111"),
-    '3': ("11111", "00010", "00100", "00010", "00001", "10001", "01110"),
-    '4': ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
-    '5': ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
-    '6': ("00110", "01000", "10000", "11110", "10001", "10001", "01110"),
-    '7': ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
-    '8': ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
-    '9': ("01110", "10001", "10001", "01111", "00001", "00010", "01100"),
-    ' ': ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
-    '.': ("00000", "00000", "00000", "00000", "00000", "01100", "01100"),
-    ',': ("00000", "00000", "00000", "00000", "01100", "00100", "01000"),
-    "'": ("00100", "00100", "01000", "00000", "00000", "00000", "00000"),
-    '-': ("00000", "00000", "00000", "01110", "00000", "00000", "00000"),
-    ':': ("00000", "01100", "01100", "00000", "01100", "01100", "00000"),
-    '!': ("00100", "00100", "00100", "00100", "00100", "00000", "00100"),
-    '?': ("01110", "10001", "00001", "00110", "00100", "00000", "00100"),
-    '/': ("00001", "00010", "00010", "00100", "01000", "01000", "10000"),
-    '&': ("01100", "10010", "10100", "01000", "10101", "10010", "01101"),
-    '(': ("00010", "00100", "01000", "01000", "01000", "00100", "00010"),
-    ')': ("01000", "00100", "00010", "00010", "00010", "00100", "01000"),
-    '+': ("00000", "00100", "00100", "01110", "00100", "00100", "00000"),
-    '%': ("11001", "11010", "00010", "00100", "01000", "01011", "10011"),
+    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "B": ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
+    "C": ("01110", "10001", "10000", "10000", "10000", "10001", "01110"),
+    "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
+    "F": ("1111", "1000", "1000", "1110", "1000", "1000", "1000"),
+    "G": ("01110", "10001", "10000", "10111", "10001", "10001", "01111"),
+    "H": ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "I": ("111", "010", "010", "010", "010", "010", "111"),
+    "J": ("0111", "0001", "0001", "0001", "0001", "1001", "0110"),
+    "K": ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
+    "L": ("1000", "1000", "1000", "1000", "1000", "1000", "1111"),
+    "M": ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
+    "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
+    "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+    "Q": ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
+    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
+    "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
+    "T": ("1111", "0100", "0100", "0100", "0100", "0100", "0100"),
+    "U": ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "V": ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
+    "W": ("10001", "10001", "10001", "10101", "10101", "10101", "01010"),
+    "X": ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
+    "Y": ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
+    "Z": ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
+    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
+    "1": ("010", "110", "010", "010", "010", "010", "111"),
+    "2": ("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
+    "3": ("11111", "00010", "00100", "00010", "00001", "10001", "01110"),
+    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
+    "5": ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
+    "6": ("00110", "01000", "10000", "11110", "10001", "10001", "01110"),
+    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
+    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
+    "9": ("01110", "10001", "10001", "01111", "00001", "00010", "01100"),
+    " ": ("00", "00", "00", "00", "00", "00", "00"),
+    ".": ("00", "00", "00", "00", "00", "00", "11"),
+    ",": ("00", "00", "00", "00", "00", "11", "10"),
+    "'": ("11", "11", "10", "00", "00", "00", "00"),
+    "\u00b7": ("000", "000", "000", "010", "000", "000", "000"),
+    "-": ("0000", "0000", "0000", "1111", "0000", "0000", "0000"),
+    ":": ("00", "00", "11", "00", "00", "11", "00"),
+    "/": ("0001", "0001", "0010", "0010", "0100", "0100", "1000"),
+    "(": ("001", "010", "100", "100", "100", "010", "001"),
+    ")": ("100", "010", "001", "001", "001", "010", "100"),
 }
 
-
-def text_width(text, scale):
-    return len(text) * 6 * scale - scale
+SPACING = 0.5  # grid units between glyphs
 
 
-def wrap_text(text, max_chars):
-    words = text.split(' ')
-    lines, cur = [], ''
-    for w in words:
-        cand = (cur + ' ' + w).strip()
-        if len(cand) <= max_chars:
-            cur = cand
+def glyph_width(ch):
+    return len(FONT[ch][0])
+
+
+def text_width(text, cap):
+    """Width in px of `text` at cap height `cap`."""
+    unit = cap / 7.0
+    total = 0.0
+    for ch in text:
+        total += (glyph_width(ch) + SPACING) * unit
+    return total - SPACING * unit
+
+
+def draw_text(x, y, text, cap, color, halo=None):
+    """Draw text with top-left at (x, y). `halo` (px) draws a paper-colour
+    bleed behind the glyphs first (for text sitting on the teal sea)."""
+    unit = cap / 7.0
+    if halo is not None:
+        cx = x
+        for ch in text:
+            g = FONT[ch]
+            w = len(g[0])
+            for r in range(7):
+                for c in range(w):
+                    if g[r][c] == "1":
+                        fill_rect(cx + c * unit - halo, y + r * unit - halo,
+                                  unit + 2 * halo, unit + 2 * halo, PAPER)
+            cx += (w + SPACING) * unit
+    cx = x
+    for ch in text:
+        g = FONT[ch]
+        w = len(g[0])
+        for r in range(7):
+            for c in range(w):
+                if g[r][c] == "1":
+                    # slight overlap so scaled cells never leave hairline gaps
+                    fill_rect(cx + c * unit, y + r * unit,
+                              unit + 0.8, unit + 0.8, color)
+        cx += (w + SPACING) * unit
+
+
+def draw_text_centred(cx, y, text, cap, color, halo=None):
+    draw_text(cx - text_width(text, cap) / 2.0, y, text, cap, color, halo)
+
+
+def draw_text_right(x1, y, text, cap, color, halo=None):
+    draw_text(x1 - text_width(text, cap), y, text, cap, color, halo)
+
+
+def wrap_text(text, cap, max_width, max_lines):
+    """Greedy word wrap; returns list of lines (<= max_lines, or best
+    effort with the last line allowed to stand alone)."""
+    words = text.split(" ")
+    lines = []
+    cur = ""
+    for word in words:
+        trial = word if not cur else cur + " " + word
+        if text_width(trial, cap) <= max_width or not cur:
+            cur = trial
         else:
-            if cur:
-                lines.append(cur)
-            cur = w
+            lines.append(cur)
+            cur = word
     if cur:
         lines.append(cur)
-    return lines
+    return lines[:max_lines]
 
 
-# ------------------------------------------------------------------ canvas --
-class Canvas:
-    def __init__(self, w, h, bg):
-        self.w = w
-        self.h = h
-        self.px = bytearray(bg[0] for _ in range(w * h * 3))
-        # fill properly (bytearray above repeats only first channel); redo:
-        buf = bytearray(w * h * 3)
-        for i in range(w * h):
-            buf[i * 3] = bg[0]
-            buf[i * 3 + 1] = bg[1]
-            buf[i * 3 + 2] = bg[2]
-        self.px = buf
-
-    def set(self, x, y, c):
-        if 0 <= x < self.w and 0 <= y < self.h:
-            i = (y * self.w + x) * 3
-            self.px[i] = c[0]
-            self.px[i + 1] = c[1]
-            self.px[i + 2] = c[2]
-
-    def fill_rect(self, x0, y0, x1, y1, c):
-        x0 = max(0, x0)
-        y0 = max(0, y0)
-        x1 = min(self.w, x1)
-        y1 = min(self.h, y1)
-        for y in range(y0, y1):
-            base = (y * self.w + x0) * 3
-            for x in range(x0, x1):
-                i = base + (x - x0) * 3
-                self.px[i] = c[0]
-                self.px[i + 1] = c[1]
-                self.px[i + 2] = c[2]
-
-    def rect_border(self, x0, y0, x1, y1, c, t=2):
-        self.fill_rect(x0, y0, x1, y0 + t, c)
-        self.fill_rect(x0, y1 - t, x1, y1, c)
-        self.fill_rect(x0, y0, x0 + t, y1, c)
-        self.fill_rect(x1 - t, y0, x1, y1, c)
-
-    def hline(self, x0, x1, y, c, t=1):
-        self.fill_rect(x0, y, x1, y + t, c)
-
-    def vline(self, x, y0, y1, c, t=1):
-        self.fill_rect(x, y0, x + t, y1, c)
-
-    def line(self, x0, y0, x1, y1, c, t=1):
-        dx = abs(x1 - x0)
-        dy = -abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1
-        sy = 1 if y0 < y1 else -1
-        err = dx + dy
-        x, y = x0, y0
-        while True:
-            self.fill_rect(x - t // 2, y - t // 2, x + t // 2 + 1, y + t // 2 + 1, c)
-            if x == x1 and y == y1:
-                break
-            e2 = 2 * err
-            if e2 >= dy:
-                err += dy
-                x += sx
-            if e2 <= dx:
-                err += dx
-                y += sy
-
-    def circle(self, cx, cy, r, c):
-        for y in range(cy - r, cy + r + 1):
-            for x in range(cx - r, cx + r + 1):
-                if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r:
-                    self.set(x, y, c)
-
-    def ellipse(self, cx, cy, rx, ry, c):
-        for y in range(cy - ry, cy + ry + 1):
-            for x in range(cx - rx, cx + rx + 1):
-                if ((x - cx) * (x - cx)) * ry * ry + ((y - cy) * (y - cy)) * rx * rx <= rx * rx * ry * ry:
-                    self.set(x, y, c)
-
-    def triangle(self, p0, p1, p2, c):
-        xs = [p0[0], p1[0], p2[0]]
-        ys = [p0[1], p1[1], p2[1]]
-        ymin, ymax = min(ys), max(ys)
-        pts = sorted(zip(xs, ys), key=lambda p: p[1])
-        (ax, ay), (bx, by), (cx, cy) = pts
-        for y in range(ymin, ymax + 1):
-            xa = ax + (cx - ax) * (y - ay) / (cy - ay) if cy != ay else ax
-            if y < by:
-                xb = ax + (bx - ax) * (y - ay) / (by - ay) if by != ay else ax
-            else:
-                xb = bx + (cx - bx) * (y - by) / (cy - by) if cy != by else bx
-            x0, x1 = int(min(xa, xb)), int(max(xa, xb))
-            self.fill_rect(x0, y, x1 + 1, y + 1, c)
-
-    def polygon(self, pts, c):
-        ymin = min(p[1] for p in pts)
-        ymax = max(p[1] for p in pts)
-        n = len(pts)
-        for y in range(ymin, ymax + 1):
-            xs = []
-            for i in range(n):
-                x0, y0 = pts[i]
-                x1, y1 = pts[(i + 1) % n]
-                if (y0 <= y < y1) or (y1 <= y < y0):
-                    xs.append(x0 + (y - y0) * (x1 - x0) / (y1 - y0))
-            xs.sort()
-            for j in range(0, len(xs) - 1, 2):
-                self.fill_rect(int(xs[j]), y, int(xs[j + 1]) + 1, y + 1, c)
-
-    def text(self, x, y, s, scale, c):
-        for ch in s:
-            g = FONT.get(ch.upper(), FONT[' '])
-            for r in range(7):
-                row = g[r]
-                for col in range(5):
-                    if row[col] == '1':
-                        self.fill_rect(x + col * scale, y + r * scale,
-                                       x + (col + 1) * scale, y + (r + 1) * scale, c)
-            x += 6 * scale
-
-    def text_center(self, cx, y, s, scale, c):
-        self.text(cx - text_width(s, scale) // 2, y, s, scale, c)
-
-
-# -------------------------------------------------------------- PNG writer --
-def chunk(ctype, data):
-    out = struct.pack('>I', len(data)) + ctype + data
-    out += struct.pack('>I', zlib.crc32(ctype + data) & 0xFFFFFFFF)
-    return out
-
-
-def write_png(cv, path):
+# --- PNG encoder (filter 0, RGB8, deterministic) ---------------------------
+def png_bytes():
     raw = bytearray()
-    for y in range(cv.h):
-        raw.append(0)
-        raw += cv.px[y * cv.w * 3:(y + 1) * cv.w * 3]
-    ihdr = struct.pack('>IIBBBBB', cv.w, cv.h, 8, 2, 0, 0, 0)
-    data = b'\x89PNG\r\n\x1a\n'
-    data += chunk(b'IHDR', ihdr)
-    data += chunk(b'IDAT', zlib.compress(bytes(raw), 9))
-    data += chunk(b'IEND', b'')
-    with open(path, 'wb') as f:
-        f.write(data)
-    return len(data)
+    for row in _rows:
+        raw.append(0)  # filter: none
+        raw.extend(row)
+    comp = zlib.compress(bytes(raw), 9)
+
+    def chunk(ctype, data):
+        out = struct.pack(">I", len(data)) + ctype + data
+        out += struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
+        return out
+
+    ihdr = struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", comp)
+            + chunk(b"IEND", b""))
 
 
-# ------------------------------------------------------------------ scenes --
-def flame(cv, x, base_y, hgt, wdt):
-    """A layered flame tongue rising from (x, base_y)."""
-    cv.triangle((x - wdt, base_y), (x + wdt, base_y), (x, base_y - hgt), FLAME_R)
-    cv.triangle((x - int(wdt * 0.65), base_y), (x + int(wdt * 0.65), base_y),
-                (x, base_y - int(hgt * 0.72)), FLAME_O)
-    cv.triangle((x - int(wdt * 0.35), base_y), (x + int(wdt * 0.35), base_y),
-                (x, base_y - int(hgt * 0.45)), FLAME_Y)
+
+# --- pictograms --------------------------------------------------------------
+# Each draws inside a box (bx, by, bw, bh) with flat 2-3 colour shapes.
+
+def pic_phone(bx, by, bw, bh):
+    """Huawei: phone with a chip on its screen."""
+    x0, y0 = bx + 52, by + 2
+    w, h = 40, 44
+    fill_rect(x0, y0, w, h, INK)                    # phone body
+    fill_rect(x0 + 4, y0 + 4, w - 8, h - 8, PAPER)  # screen
+    # chip: ochre square + pins
+    cx, cy = x0 + w // 2, y0 + h // 2 + 1
+    fill_rect(cx - 8, cy - 8, 16, 16, OCHRE)
+    fill_rect(cx - 4, cy - 4, 8, 8, INK)
+    for dy in (-8, -3, 2):
+        fill_rect(cx - 12, cy + dy, 4, 2, INK)
+        fill_rect(cx + 8, cy + dy, 4, 2, INK)
+    for dx in (-8, -3, 2):
+        fill_rect(cx + dx, cy - 12, 2, 4, INK)
+        fill_rect(cx + dx, cy + 8, 2, 4, INK)
+    # earpiece + home bar
+    fill_rect(cx - 6, y0 + 7, 12, 2, INK)
+    fill_rect(cx - 6, y0 + h - 7, 12, 2, INK)
+    # signal bars, top right of the box
+    for i, bh2 in enumerate((8, 13, 18)):
+        fill_rect(bx + 108 + i * 9, by + 26 - bh2, 6, bh2, TEAL)
+    # red "verdict" tick under the bars
+    thick_line(bx + 104, by + 36, bx + 112, by + 44, 4, RED)
+    thick_line(bx + 112, by + 44, bx + 128, by + 28, 4, RED)
 
 
-def smoke_puff(cv, x, y, r, c):
-    cv.circle(x, y, r, c)
-    cv.circle(x + r // 2, y - r // 3, int(r * 0.7), c)
+def pic_pact(bx, by, bw, bh):
+    """Pacific pact: two islands joined by a dashed agreement line."""
+    # islands (teal)
+    fill_ellipse(bx + 34, by + 36, 27, 11, TEAL)
+    fill_ellipse(bx + 116, by + 32, 23, 10, TEAL)
+    # palm dots on the islands
+    fill_circle(bx + 30, by + 22, 3, INK)
+    fill_circle(bx + 118, by + 19, 3, INK)
+    # dashed pact line arcing between them
+    dashed_line(bx + 34, by + 18, bx + 116, by + 14, 9, 6, 3, INK)
+    # red seal at the middle of the line
+    fill_circle(bx + 75, by + 12, 6, RED)
+    fill_circle(bx + 75, by + 12, 2, PAPER)
+    # sea dashes under the islands
+    fill_rect(bx + 12, by + 44, 26, 3, TEAL)
+    fill_rect(bx + 100, by + 44, 26, 3, TEAL)
+    # ochre sun
+    fill_circle(bx + 138, by + 8, 6, OCHRE)
 
 
-def draw_hero(cv, x0, y0, x1, y1):
-    """Burning tankers in the Strait of Hormuz at dusk. Scene area only."""
-    w = x1 - x0
-    horizon = y0 + int((y1 - y0) * 0.58)
-    # sky bands
-    bands = [(SKY1, 0.30), (SKY2, 0.55), (SKY3, 0.80), (SKY4, 1.0)]
-    prev = y0
-    for col, frac in bands:
-        yy = y0 + int((horizon - y0) * frac)
-        cv.fill_rect(x0, prev, x1, yy, col)
-        prev = yy
-    # low sun, right side, half veiled by smoke
-    cv.circle(x0 + int(w * 0.82), y0 + 78, 52, SUN)
-    cv.circle(x0 + int(w * 0.82), y0 + 78, 38, (255, 248, 220))
-    # distant tanker silhouette, left
-    cv.fill_rect(x0 + 70, horizon - 26, x0 + 300, horizon - 6, (35, 49, 64))
-    cv.fill_rect(x0 + 210, horizon - 52, x0 + 252, horizon - 26, (35, 49, 64))
-    cv.fill_rect(x0 + 96, horizon - 40, x0 + 118, horizon - 26, (35, 49, 64))
-    # sea
-    cv.fill_rect(x0, horizon, x1, y1, SEA)
-    # wave strokes
-    for i, yy in enumerate(range(horizon + 14, y1 - 8, 22)):
-        xoff = (i * 53) % 160
-        cv.hline(x0 + 40 + xoff, x0 + 150 + xoff, yy, SEA2, 3)
-        cv.hline(x0 + 430 + ((i * 91) % 220), x0 + 560 + ((i * 91) % 220), yy + 10, SEA2, 3)
-    # fire glow reflection on the sea under the flames
-    for i in range(6):
-        cv.hline(x0 + 400 + i * 8, x0 + 620 - i * 8, horizon + 16 + i * 12,
-                 (255, 122, 26) if i % 2 == 0 else (255, 178, 60), 4)
-    # main tanker: hull with raked bow, red waterline, white superstructure
-    deck = horizon + 52
-    cv.polygon([(x0 + 170, deck), (x0 + 800, deck), (x0 + 880, deck + 26),
-                (x0 + 860, deck + 62), (x0 + 190, deck + 62)], HULL)
-    cv.polygon([(x0 + 800, deck), (x0 + 880, deck + 26), (x0 + 860, deck + 62),
-                (x0 + 800, deck + 62)], (22, 30, 38))
-    cv.fill_rect(x0 + 170, deck + 46, x0 + 866, deck + 62, HULLRED)
-    # deck cargo: low tanks and pipes
-    cv.fill_rect(x0 + 220, deck - 26, x0 + 330, deck, (52, 62, 76))
-    cv.fill_rect(x0 + 620, deck - 22, x0 + 720, deck, (52, 62, 76))
-    cv.ellipse(x0 + 275, deck - 26, 52, 12, (70, 82, 96))
-    cv.ellipse(x0 + 670, deck - 22, 46, 10, (70, 82, 96))
-    # superstructure + funnel
-    cv.fill_rect(x0 + 730, deck - 78, x0 + 800, deck, SUPER)
-    for wx in (740, 760, 780):
-        cv.fill_rect(wx, deck - 70, wx + 12, deck - 54, INK)
-    cv.fill_rect(x0 + 756, deck - 24, x0 + 774, deck, INK)
-    cv.fill_rect(x0 + 806, deck - 96, x0 + 838, deck - 34, ACCENT)
-    cv.fill_rect(x0 + 806, deck - 96, x0 + 838, deck - 80, INK)
-    # mast
-    cv.vline(x0 + 340, deck - 84, deck, INK, 4)
-    cv.hline(x0 + 322, x0 + 358, deck - 84, INK, 4)
-    # flames bursting from mid-deck
-    flame(cv, x0 + 430, deck, 150, 46)
-    flame(cv, x0 + 500, deck, 190, 58)
-    flame(cv, x0 + 575, deck, 140, 42)
-    flame(cv, x0 + 380, deck, 90, 30)
-    flame(cv, x0 + 640, deck, 80, 28)
-    # smoke column drifting up and right (kept inside the scene)
-    smoke_puff(cv, x0 + 470, deck - 150, 30, SMOKE)
-    smoke_puff(cv, x0 + 520, deck - 185, 34, SMOKE2)
-    smoke_puff(cv, x0 + 590, deck - 210, 40, SMOKE)
-    smoke_puff(cv, x0 + 680, deck - 215, 40, SMOKE2)
-    smoke_puff(cv, x0 + 790, deck - 225, 34, SMOKE)
-    # birds
-    for bx, by in ((x0 + 150, y0 + 60), (x0 + 190, y0 + 84), (x0 + 120, y0 + 100)):
-        cv.line(bx - 10, by, bx, by - 7, INK, 3)
-        cv.line(bx, by - 7, bx + 10, by, INK, 3)
+def pic_refinery(bx, by, bw, bh):
+    """Ukraine: refinery tower + chimney with flat flames."""
+    # tower
+    fill_rect(bx + 18, by + 16, 34, 30, INK)
+    fill_rect(bx + 18, by + 24, 34, 3, PAPER)
+    fill_rect(bx + 18, by + 33, 34, 3, PAPER)
+    # chimney
+    fill_rect(bx + 58, by + 24, 12, 22, INK)
+    # flat flames: red outer, ochre inner
+    fill_polygon([(bx + 22, by + 16), (bx + 48, by + 16),
+                  (bx + 35, by + 2)], RED)
+    fill_polygon([(bx + 29, by + 16), (bx + 41, by + 16),
+                  (bx + 35, by + 7)], OCHRE)
+    fill_polygon([(bx + 60, by + 24), (bx + 68, by + 24),
+                  (bx + 64, by + 15)], RED)
+    # storage tank
+    fill_circle(bx + 96, by + 38, 10, TEAL)
+    fill_rect(bx + 86, by + 28, 20, 3, TEAL)
+    # ochre sun / blast dot
+    fill_circle(bx + 128, by + 10, 6, OCHRE)
 
 
-def draw_card_huawei(cv, x0, y0, x1, y1):
-    """A smartphone with a glowing chip — Huawei's chip push."""
-    cv.fill_rect(x0, y0, x1, y1, NAVY)
-    cx = (x0 + x1) // 2
-    cy = (y0 + y1) // 2
-    # circuit traces
-    for tx in (x0 + 24, x1 - 24):
-        cv.vline(tx, y0 + 16, y1 - 16, (46, 84, 120), 2)
-    cv.hline(x0 + 24, x1 - 24, y0 + 18, (46, 84, 120), 2)
-    cv.hline(x0 + 24, x1 - 24, y1 - 18, (46, 84, 120), 2)
-    for dx, dy in ((-52, -38), (52, -38), (-52, 38), (52, 38)):
-        cv.circle(cx + dx, cy + dy, 4, CHIP)
-    # phone body
-    pw, ph = 108, 128
-    px0, py0 = cx - pw // 2, cy - ph // 2 + 4
-    cv.fill_rect(px0, py0, px0 + pw, py0 + ph, PHONE)
-    cv.rect_border(px0, py0, px0 + pw, py0 + ph, (120, 132, 150), 2)
-    cv.fill_rect(px0 + 8, py0 + 12, px0 + pw - 8, py0 + ph - 14, (16, 24, 40))
-    # chip on the screen
-    ch = 44
-    cv.fill_rect(cx - ch // 2, cy - ch // 2, cx + ch // 2, cy + ch // 2, CHIP)
-    cv.rect_border(cx - ch // 2, cy - ch // 2, cx + ch // 2, cy + ch // 2, (140, 100, 10), 2)
-    for k in range(5):
-        off = -16 + k * 8
-        cv.vline(cx + off, cy - ch // 2 - 8, cy - ch // 2, CHIP, 2)
-        cv.vline(cx + off, cy + ch // 2, cy + ch // 2 + 8, CHIP, 2)
-        cv.hline(cx - ch // 2 - 8, cx - ch // 2, cy + off, CHIP, 2)
-        cv.hline(cx + ch // 2, cx + ch // 2 + 8, cy + off, CHIP, 2)
-    cv.text_center(cx, cy - 7, 'AI', 2, NAVY)
-    # red accent bar + speaker dot
-    cv.fill_rect(px0 + 8, py0 + ph - 8, px0 + pw - 8, py0 + ph - 5, ACCENT)
-    cv.circle(cx, py0 + 6, 2, (120, 132, 150))
+def pic_rocket(bx, by, bw, bh):
+    """Pakistan astronaut: rocket + Tiangong ring station."""
+    # rocket body (paper with ink outline)
+    fill_rect(bx + 28, by + 12, 18, 28, INK)
+    fill_rect(bx + 30, by + 14, 14, 24, PAPER)
+    # nose cone (red)
+    fill_polygon([(bx + 28, by + 13), (bx + 46, by + 13),
+                  (bx + 37, by + 2)], RED)
+    # window
+    fill_circle(bx + 37, by + 22, 3, TEAL)
+    # fins (teal)
+    fill_polygon([(bx + 28, by + 32), (bx + 28, by + 42),
+                  (bx + 18, by + 44)], TEAL)
+    fill_polygon([(bx + 46, by + 32), (bx + 46, by + 42),
+                  (bx + 56, by + 44)], TEAL)
+    # flat flame (ochre)
+    fill_polygon([(bx + 31, by + 40), (bx + 43, by + 40),
+                  (bx + 37, by + 47)], OCHRE)
+    # station ring (ink ring, paper centre) + module bar
+    ring(bx + 108, by + 18, 15, 11, INK)
+    fill_rect(bx + 92, by + 15, 32, 6, INK)
+    fill_rect(bx + 104, by + 12, 8, 12, TEAL)
+    # small red star
+    sx, sy = bx + 132, by + 40
+    fill_rect(sx - 2, sy - 7, 4, 14, RED)
+    fill_rect(sx - 7, sy - 2, 14, 4, RED)
 
 
-def draw_card_pacific(cv, x0, y0, x1, y1):
-    """Pacific islands joined by a dotted route — the Pacific Pact."""
-    cv.fill_rect(x0, y0, x1, y1, OCEAN)
-    # sun and clouds
-    cv.circle(x1 - 44, y0 + 30, 20, SUN)
-    cv.ellipse(x0 + 46, y0 + 26, 26, 8, WHITE)
-    cv.ellipse(x0 + 66, y0 + 32, 20, 7, WHITE)
-    # dotted pact route arc
-    cx, cy, r = (x0 + x1) // 2, y1 - 6, 96
-    for deg in range(195, 346, 6):
-        import math
-        a = math.radians(deg)
-        cv.circle(int(cx + r * math.cos(a)), int(cy + r * 0.92 * math.sin(a)), 3, WHITE)
-    # islands
-    islands = [(x0 + 52, y0 + 108, 30, 14), (x0 + 150, y0 + 78, 24, 12),
-               (x0 + 236, y0 + 112, 34, 15), (x0 + 120, y0 + 128, 20, 10)]
-    for ix, iy, rx, ry in islands:
-        cv.ellipse(ix, iy, rx, ry, ISLAND)
-        cv.ellipse(ix, iy - 3, int(rx * 0.7), int(ry * 0.6), (96, 168, 96))
-    # palm-ish marker on the big island
-    bx, by = x0 + 236, y0 + 112
-    cv.line(bx, by - 12, bx, by - 30, (30, 80, 30), 3)
-    cv.line(bx, by - 30, bx - 12, by - 36, (30, 80, 30), 3)
-    cv.line(bx, by - 30, bx + 12, by - 36, (30, 80, 30), 3)
-    # small boats
-    for sx, sy in ((x0 + 90, y0 + 66), (x0 + 196, y0 + 58)):
-        cv.polygon([(sx - 14, sy), (sx + 14, sy), (sx + 8, sy + 8), (sx - 8, sy + 8)], WHITE)
-        cv.line(sx, sy, sx, sy - 14, INK, 2)
-        cv.triangle((sx, sy - 14), (sx, sy - 2), (sx + 11, sy - 2), ACCENT)
-    # wave lines
-    for yy in (y1 - 34, y1 - 20):
-        for wx in range(x0 + 14, x1 - 30, 46):
-            cv.line(wx, yy, wx + 12, yy - 5, (140, 200, 220), 2)
-            cv.line(wx + 12, yy - 5, wx + 24, yy, (140, 200, 220), 2)
+def draw_mine(cx, cy, r):
+    """Spiky naval mine: ink disc + spikes + red centre."""
+    for k in range(8):
+        a = math.pi * k / 4.0
+        thick_line(cx + math.cos(a) * r * 0.7, cy + math.sin(a) * r * 0.7,
+                   cx + math.cos(a) * (r + 8), cy + math.sin(a) * (r + 8),
+                   3, INK)
+    fill_circle(cx, cy, r, INK)
+    fill_circle(cx, cy, 4, RED)
 
 
-def draw_card_refinery(cv, x0, y0, x1, y1):
-    """Oil refinery towers at dusk, one column on fire — Ukraine."""
-    cv.fill_rect(x0, y0, x1, y1, DUSK)
-    cv.circle(x1 - 40, y0 + 28, 18, (249, 217, 118))
-    # ground
-    gy = y1 - 26
-    cv.fill_rect(x0, gy, x1, y1, (24, 22, 34))
-    # storage tanks
-    for tx in (x0 + 34, x0 + 96):
-        cv.fill_rect(tx, gy - 34, tx + 46, gy, STEEL)
-        cv.ellipse(tx + 23, gy - 34, 23, 7, (96, 102, 120))
-        cv.hline(tx, tx + 46, gy - 20, (52, 56, 68), 2)
-    # distillation columns (kept inside the scene)
-    cols = [(x0 + 168, 66), (x0 + 214, 82), (x0 + 258, 58)]
-    for cx0, chh in cols:
-        cv.fill_rect(cx0, gy - chh, cx0 + 22, gy, STEEL)
-        cv.fill_rect(cx0 - 3, gy - chh, cx0 + 25, gy - chh + 4, (96, 102, 120))
-        for py in range(gy - chh + 16, gy - 8, 18):
-            cv.hline(cx0 - 4, cx0 + 26, py, (52, 56, 68), 2)
-    # pipes between columns
-    cv.hline(x0 + 168, x0 + 280, gy - 70, (52, 56, 68), 3)
-    cv.hline(x0 + 168, x0 + 280, gy - 44, (52, 56, 68), 3)
-    # flame + smoke on the middle column
-    flame(cv, x0 + 225, gy - 82, 34, 16)
-    flame(cv, x0 + 269, gy - 58, 26, 11)
-    smoke_puff(cv, x0 + 225, gy - 104, 11, SMOKE)
-    smoke_puff(cv, x0 + 246, gy - 112, 11, SMOKE2)
-    # wheat-gold accent strip (Ukraine)
-    cv.fill_rect(x0, y1 - 6, x1, y1, GOLD)
+def draw_tanker(x, y_base, w):
+    """Flat tanker silhouette sitting on the sea (y_base = waterline)."""
+    top = y_base - 20
+    hull = [(x, top), (x + w - 34, top), (x + w, top + 10),
+            (x + w - 8, y_base), (x, y_base)]
+    fill_polygon(hull, INK)
+    # deckhouse (paper) + funnel (ochre) + flat flame
+    fill_rect(x + 14, top - 16, 34, 16, PAPER)
+    fill_rect(x + 14, top - 16, 34, 3, INK)
+    fill_rect(x + 58, top - 24, 16, 24, OCHRE)
+    fill_polygon([(x + 55, top - 24), (x + 77, top - 24),
+                  (x + 66, top - 48)], RED)
+    fill_polygon([(x + 61, top - 24), (x + 71, top - 24),
+                  (x + 66, top - 36)], OCHRE)
+    # portholes
+    for px in (x + 96, x + 122, x + 148):
+        fill_circle(px, top + 10, 3, PAPER)
+    # bow flag
+    fill_rect(x + w - 26, top - 12, 2, 12, INK)
+    fill_rect(x + w - 24, top - 12, 12, 7, RED)
 
 
-# ------------------------------------------------------------------ layout --
+def draw_chip(x, y, text, cap, fill=False):
+    """Region chip: outlined box (or red-filled) with centred text."""
+    tw = text_width(text, cap)
+    bw = tw + 22
+    bh = cap + 8
+    if fill:
+        fill_rect(x, y, bw, bh, RED)
+        draw_text(x + 11, y + 4, text, cap, PAPER)
+    else:
+        fill_rect(x, y, bw, 3, RED)
+        fill_rect(x, y + bh - 3, bw, 3, RED)
+        fill_rect(x, y, 3, bh, RED)
+        fill_rect(x + bw - 3, y, 3, bh, RED)
+        draw_text(x + 11, y + 4, text, cap, RED)
+    return bw
+
+
+# --- layout ------------------------------------------------------------------
+def draw_masthead():
+    draw_text_centred(W / 2, 16, "THE WORLD TODAY", 64, INK)
+    fill_rect(0, 96, W, 6, RED)
+
+
+def draw_date_band():
+    fill_rect(0, 102, W, 64, RED)
+    draw_text_centred(W / 2, 112, "WEDNESDAY \u00b7 25 NOVEMBER 2026",
+                      44, PAPER)
+
+
+def draw_hero():
+    # headline, two lines, cap 80
+    draw_text_centred(W / 2, 178, "TANKERS HIT MINES,", 80, INK)
+    draw_text_centred(W / 2, 272, "BURN IN HORMUZ", 80, INK)
+    # sea band (drawn BEFORE the giant "2" so the digit sits on top)
+    fill_rect(16, 436, W - 32, 62, TEAL)
+    # waves
+    for wx, wy in ((180, 452), (560, 462), (880, 452),
+                   (330, 478), (700, 480), (940, 474)):
+        fill_rect(wx, wy, 30, 3, WHITE)
+    # mines in the water
+    draw_mine(205, 468, 12)
+    draw_mine(580, 472, 10)
+    draw_mine(955, 466, 12)
+    # two tankers
+    draw_tanker(260, 498, 300)
+    draw_tanker(620, 498, 290)
+    # giant "2" (red, paper halo so it reads over the teal sea)
+    draw_text(24, 356, "2", 150, RED, halo=7)
+    # hero footer: subline / chip / source
+    draw_text(24, 510, "STRAIT OF HORMUZ", 32, INK)
+    draw_chip(392, 506, "MIDDLE EAST", 32, fill=True)
+    draw_text_right(1000, 510, "REUTERS", 32, INK)
+
+
+CARDS = [
+    ("HUAWEI CONVICTED IN US TRIAL", "EAST ASIA", "REUTERS", pic_phone),
+    ("AUSTRALIA SIGNS PACIFIC SECURITY PACT", "PACIFIC", "NEWS WIRES",
+     pic_pact),
+    ("UKRAINE STRIKES RUSSIAN ENERGY SITES", "EUROPE", "NEWS WIRES",
+     pic_refinery),
+    ("PAKISTAN'S FIRST ASTRONAUT REACHES TIANGONG", "SOUTH ASIA",
+     "REUTERS", pic_rocket),
+]
+
+
+def draw_card(x0, y0, headline, region, source, pic):
+    w, h = 488, 228
+    # border
+    fill_rect(x0, y0, w, 3, INK)
+    fill_rect(x0, y0 + h - 3, w, 3, INK)
+    fill_rect(x0, y0, 3, h, INK)
+    fill_rect(x0 + w - 3, y0, 3, h, INK)
+    # pictogram band (left) + region chip (right, same band)
+    pic(x0 + 14, y0 + 10, 150, 48)
+    chip_w = text_width(region, 32) + 22
+    draw_chip(x0 + w - 14 - chip_w, y0 + 10, region, 32, fill=False)
+    # headline, cap 38, up to 3 lines
+    lines = wrap_text(headline, 38, w - 28, 3)
+    yy = y0 + 60
+    for line in lines:
+        draw_text(x0 + 14, yy, line, 38, INK)
+        yy += 42
+    # source line
+    draw_text(x0 + 14, y0 + 190, source, 32, INK)
+
+
+def draw_cards():
+    positions = [(16, 548), (520, 548), (16, 792), (520, 792)]
+    for (x0, y0), (headline, region, source, pic) in zip(positions, CARDS):
+        draw_card(x0, y0, headline, region, source, pic)
+
+
 def build():
-    cv = Canvas(W, H, PAPER)
-    # outer frame
-    cv.rect_border(0, 0, W, H, INK, 6)
-    cv.rect_border(12, 12, W - 12, H - 12, INK, 2)
-
-    # masthead
-    cv.text_center(W // 2, 34, 'THE WORLD TODAY', 6, INK)
-    cv.hline(120, W - 120, 88, INK, 3)
-    cv.text_center(W // 2, 98, 'WEDNESDAY, 25 NOVEMBER 2026', 3, (180, 132, 20))
-
-    # hero panel
-    hx0, hy0, hx1, hy1 = 24, 128, 1000, 606
-    cv.rect_border(hx0, hy0, hx1, hy1, INK, 3)
-    draw_hero(cv, hx0 + 3, hy0 + 3, hx1 - 3, hy1 - 3 - 108)
-    strip_y = hy1 - 108
-    cv.fill_rect(hx0 + 3, strip_y, hx1 - 3, hy1 - 3, INK)
-    cv.text_center(W // 2, strip_y + 10, 'TANKERS ABLAZE', 6, WHITE)
-    cv.text_center(W // 2, strip_y + 56, 'IN THE STRAIT OF HORMUZ', 6, (255, 210, 63))
-
-    # three story cards
-    cy0, cy1 = 622, 1000
-    cw = (976 - 32) // 3  # 314
-    cards = [
-        ('TECH', ['HUAWEI', 'CHIP PUSH'],
-         "Tech giant in the spotlight as the chip race heats up.",
-         draw_card_huawei),
-        ('DIPLOMACY', ['PACIFIC PACT'],
-         "Nations around the Pacific sign a new deal.",
-         draw_card_pacific),
-        ('ENERGY', ['REFINERIES', 'UNDER FIRE'],
-         "Strikes hit Ukraine's fuel plants as winter nears.",
-         draw_card_refinery),
-    ]
-    for i, (kicker, head_lines, sub, scene) in enumerate(cards):
-        x0 = 24 + i * (cw + 16)
-        x1 = x0 + cw
-        cv.fill_rect(x0, cy0, x1, cy1, CARD)
-        cv.rect_border(x0, cy0, x1, cy1, INK, 3)
-        scene(cv, x0 + 3, cy0 + 3, x1 - 3, cy0 + 153)
-        ty = cy0 + 166
-        cv.text_center((x0 + x1) // 2, ty, kicker, 2, ACCENT)
-        ty += 26
-        for line in head_lines:
-            cv.text_center((x0 + x1) // 2, ty, line, 4, INK)
-            ty += 32
-        ty += 8
-        for line in wrap_text(sub, 24):
-            cv.text_center((x0 + x1) // 2, ty, line, 2, (60, 60, 70))
-            ty += 18
-    return cv
+    new_canvas()
+    draw_masthead()
+    draw_date_band()
+    draw_hero()
+    draw_cards()
+    return png_bytes()
 
 
 def main():
-    out_dir = os.environ.get('MAKEFUN_OUTPUT_DIR', 'out')
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "out")
     os.makedirs(out_dir, exist_ok=True)
-    cv = build()
-    path = os.path.join(out_dir, 'entry.png')
-    size = write_png(cv, path)
-    print('wrote %s (%d bytes, %dx%d)' % (path, size, W, H))
+    data = build()
+    path = os.path.join(out_dir, "entry.png")
+    with open(path, "wb") as f:
+        f.write(data)
+    sys.stdout.write("wrote %s (%d bytes)\n" % (path, len(data)))
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())
